@@ -14,6 +14,7 @@ has _buffer => (
     default => sub { [] },
     handles => {
         push => "push",
+        size => "count",
     },
 );
 
@@ -28,7 +29,7 @@ sub peek {
 sub match {
     my ( $self, $filter ) = @_;
 
-    $filter ||= sub { 1 };
+    $filter = sub { 1 } if @_ < 2;
 
     Message::Match::Util::splice_first($self->_buffer, $filter);
 }

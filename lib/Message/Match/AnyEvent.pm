@@ -15,7 +15,7 @@ has _inbox => (
     isa => "Message::Match::Inbox",
     is  => "ro",
     default => sub { Message::Match::Inbox->new },
-    handles => [qw(match peek)],
+    handles => [qw(match peek size)],
 );
 
 has _filters => (
@@ -66,9 +66,8 @@ sub push_cb {
 sub receive_cv {
     my ( $self, $filter, $cb ) = @_;
 
-    $filter ||= sub { 1 };
-
-    $cb ||= AE::cv();
+    $filter = sub { 1 } if @_ < 2;
+    $cb = AE::cv() if @_ < 3;
 
     if ( defined( my $message = $self->_inbox->match($filter) ) ) {
         _invoke($cb, $message);
@@ -88,7 +87,8 @@ sub receive {
 sub wait {
     my ( $self, $filter, $cb ) = @_;
     
-    my $cv ||= AE::cv();
+    $filter = sub { 1 } if @_ < 2;
+    $cb = AE::cv() if @_ < 3;
 
     $self->_push_filter({ filter => $filter, cb => $cb });
 }

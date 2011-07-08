@@ -2,12 +2,13 @@ package Message::Match::Coro;
 use Moose;
 
 use Coro;
+use Guard;
 
 use Message::Match::Inbox;
 
 use namespace::autoclean;
 
-extends qw(Message::Match::Blocking);
+extends qw(Message::Match::Blocking); # FIXME role!
 
 has '+read' => ( required => 0 );
 
@@ -18,15 +19,34 @@ has _inbox => (
     handles => [qw(match peek)],
 );
 
+before match => sub {
+    my $self = shift;
+    $self->read_all;
+};
+
+sub read_all {
+    my $self = shift;
+
+    while ( $self->_channel->size ) {
+        my $message = $self->get_next();
+        $self->_inbox->push( $message );
+    }
+}
+
+sub size {
+    my $self = shift;
+    $self->_inbox->size + $self->_channel->size;
+}
+
 has _waiting => (
-    isa => "Bool",
+    #isa => "Bool",
     is  => "rw",
 );
 
 has _channel => (
     isa => "Coro::Channel",
     is  => "ro",
-    default => sub { Coro::Channel->new(1) },
+    default => sub { Coro::Channel->new },
 );
 
 sub push {
@@ -42,11 +62,10 @@ sub push {
 sub get_next {
     my $self = shift;
 
+    scope_guard { $self->_waiting(0) };
     $self->_waiting(1);
-    my $message = $self->_channel->get;
-    $self->_waiting(0);
 
-    return $message;
+    $self->_channel->get;
 }
 
 __PACKAGE__->meta->make_immutable;

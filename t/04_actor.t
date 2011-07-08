@@ -6,15 +6,30 @@ use warnings;
 use 5.010;
 
 use Test::More;
+use Try::Tiny;
+
+BEGIN {
+    try {
+        require Smart::Match; Smart::Match->VERSION(0.004);
+        require Smart::Match::Bind;
+    } catch { plan 'skip_all' => "Smart::Match 0.004 and Smart::Match::Bind required" };
+}
 
 use Coro;
 use Coro::Timer qw(sleep);
+use List::Util qw(shuffle);
 
 my ($set,$cleared) = ( 0, 0 );
+
+our $cede_at_start = 0;
 
 {
     package MockActor;
     use Moose;
+
+    use Coro;
+    use Smart::Match qw(:all);
+    use Smart::Match::Bind qw(:all);
 
     use Scalar::Util qw(refaddr);
 
@@ -43,83 +58,120 @@ my ($set,$cleared) = ( 0, 0 );
     sub run {
         my $self = shift;
 
+        cede if $::cede_at_start;
+        
         while ( 1 ) {
-            Coro::cede();
-            unless ( $self->has_friend ) {
-                given ( $self->receive([ qr/exit|make_friend|friended/, sub { 1 } ]) ) {
-                    when ([ "exit", sub { 1 } ]) { Coro::terminate() };
-                    when ([ "make_friend", sub { 1 } ]) {
-                        my $friend = $_->[1];
-                        $self->set_friend($friend);
-                        $friend->message([ friended => $self ]);
-                    };
-                    when ([ "friended", sub { 1 } ]) {
-                        my $friend = $_->[1];
-                        $self->set_friend($friend);
-                        $friend->message([ chat => [ $self, 1 ] ]);
-                    };
-                    default { ::fail("oh noes" ); Coro::terminate() };
-                }
+            if ( $self->has_friend ) {
+                $self->talk_with_friend;
             } else {
-                given ( $self->receive([ qr/breakup|exit|chat/, sub { 1 } ]) ) {
-                    when ([ "exit", sub { 1 } ]) { Coro::terminate() };
-                    when ([ "breakup", sub { 1 } ]) { $self->clear_friend };
-                    when ([ "chat", sub { 1 } ]) {
-                        my ( $friend, $i ) = @{ $_->[1] };
-                        ::fail("not talking with friend") if refaddr($friend) != refaddr($self->friend);
-                        if ( $i < 3 ) {
-                            $self->friend->message([ chat => [ $self, $i + 1 ] ]);
-                        } else {
-                            $self->friend->message([ "breakup", $self ]);
-                            $self->clear_friend;
-                        }
-                    }
-                    default { fail("oh noes" ); Coro::terminate() };
+                $self->wait_for_friend;
+            }
+        }
+    }
+
+    sub wait_for_friend {
+        my $self = shift;
+
+        given ( $self->receive(sub_hash({ type => qr(exit|make_friend|friended) })) ) {
+            when ($_ ~~ sub_hash({ type => "exit" })) { Coro::terminate() };
+            when ($_ ~~ binding(sub_hash({
+                type => "make_friend",
+                friend => let(my $friend, true()),
+            }))) {
+                $self->establish_friendship($friend);
+            };
+            when ($_ ~~ binding(sub_hash({
+                type => "friended",
+                friend => let(my $friend, true()),
+            }))) {
+                $self->respond_to_friendship($friend);
+            };
+            default { ::fail("oh noes" ); Coro::terminate() };
+        }
+    }
+
+    sub establish_friendship {
+        my ( $self, $friend ) = @_;
+
+        $self->set_friend($friend);
+        $friend->message({ type => "friended", friend => $self });
+    }
+
+    sub respond_to_friendship {
+        my ( $self, $friend ) = @_;
+
+        $self->set_friend($friend);
+        $friend->message({ type => "chat", friend => $self, i => 1 });
+    }
+
+    sub talk_with_friend {
+        my $self = shift;
+
+        given ( $self->receive(sub_hash({ type => qr(exit|breakup|chat) })) ) {
+            when ($_ ~~ sub_hash({ type => "exit" })) { Coro::terminate() };
+            when ($_ ~~ sub_hash({ type => "breakup" })) { $self->clear_friend };
+            when ($_ ~~ binding(sub_hash({
+                type => "chat",
+                friend => let(my $friend, true()),
+                i      => let(my $i, qr/\d+/),
+            }))) {
+                ::fail("not talking with friend") if refaddr($friend) != refaddr($self->friend);
+
+                if ( $i < 2 + rand(10) ) {
+                    $self->friend->message({ type => "chat", friend => $self, i => $i + 1 });
+                } else {
+                    $self->friend->message({ type => "breakup", friend => $self });
+                    $self->clear_friend;
                 }
             }
+            default { ::fail("oh noes ". Dumper($_) ); Coro::terminate() }; use Data::Dumper;
         }
     }
 }
 
-my ( $a1, $a2, $a3 ) = map { my $_ = MockActor->new; $_->start; $_ } 1 .. 3;
 
-$a1->message([ make_friend => $a2 ]);
+alarm 2;
 
-cede until $set and not grep { $_->has_friend } $a2, $a2, $a3;
+my @actors;
+sub wait_for_silence {
+    cede while grep { $_->messages->size or $_->has_friend } @actors;
+}
 
-is( $cleared, 2 );
+for $cede_at_start ( 0, 1 ) {
 
+    my ( $a1, $a2, $a3 ) = @actors = map { my $_ = MockActor->new; $_ } 1 .. 3;
 
-$set = 0;
-$cleared = 0;
+    $_->start for @actors;
 
+    $set = 0;
+    $cleared = 0;
 
+    $a1->message({ type => "make_friend", friend => $a2 });
 
+    wait_for_silence();
 
-$a1->message([ make_friend => $a2 ]);
-$a1->message([ make_friend => $a3 ]);
-
-cede until $set == 4 and not grep { $_->has_friend } $a1, $a2, $a3;
-
-is( $cleared, 4 );
-
-
-$set = 0;
-$cleared = 0;
+    is( $set, 2 );
+    is( $cleared, 2 );
 
 
-
-$a1->message([ make_friend => $a2 ]);
-$a2->message([ make_friend => $a3 ]);
-$a3->message([ make_friend => $a1 ]);
-$a3->message([ make_friend => $a2 ]);
-
-cede until $set == 8 and not grep { $_->has_friend } $a1, $a2, $a3;
-
-is( $cleared, 8 );
+    $set = 0;
+    $cleared = 0;
 
 
-$_->message([ exit => 1 ]) for $a1, $a2, $a3;
+
+    $a1->message({ type => "make_friend", friend => $a2 });
+    $a1->message({ type => "make_friend", friend => $a3 });
+    $a1->message({ type => "make_friend", friend => $a2 });
+
+    wait_for_silence();
+
+    is( $set, 6 );
+    is( $cleared, 6 );
+
+    $_->message({ type => "exit" }) for @actors;
+
+    wait_for_silence();
+}
 
 done_testing;
 

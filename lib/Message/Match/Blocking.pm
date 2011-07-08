@@ -17,13 +17,13 @@ has _inbox => (
     isa => "Message::Match::Inbox",
     is  => "ro",
     default => sub { Message::Match::Inbox->new },
-    handles => [qw(match peek push)],
+    handles => [qw(match peek push size)],
 );
 
 sub receive {
     my ( $self, $filter ) = @_;
 
-    $filter ||= sub { 1 };
+    $filter = sub { 1 } if @_ < 2;
 
     loop: {
         if ( defined( my $message = $self->_inbox->match($filter) ) ) {
@@ -34,7 +34,7 @@ sub receive {
             if ( $message ~~ $filter ) {
                 return $message;
             } else {
-                $self->push( $message );
+                $self->_inbox->push( $message );
                 redo loop;
             }
         }
